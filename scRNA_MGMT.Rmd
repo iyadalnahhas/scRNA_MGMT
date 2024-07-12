@@ -1,0 +1,789 @@
+---
+title: "<center> What scRNA sequencing taught us about MGMT in glioblastoma <center>"
+author: "<center> Iyad Alnahhas, MD, MSc <center><br>"
+date: "<center> _`r Sys.Date()`_ <center>"
+output: 
+  html_document:
+    code_folding: show
+    df_print: paged
+    theme: yeti
+    highlight: tango
+    toc: yes
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+    number_sections: true
+  pdf_document:
+    fig_caption: yes
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+library(rmarkdown)
+library(tinytex)
+library(knitr)
+knitr::opts_chunk$set(echo=TRUE, warning=FALSE, message=FALSE)
+```
+
+## R packages used
+
+A variety of R packages was used for this analysis. All packages used are available from the Comprehensive R Archive Network (CRAN), Bioconductor.org, or Github.  
+
+## Introduction
+Astrocytomas in adults are classified into isocitrate dehydrogenase (IDH) mutant and IDH-wild-type (IDHwt) subtypes. IDH mutant astrocytomas more commonly occur in younger patients and carry relatively better prognosis. IDHwt astrocytomas, on the other hand, more commonly occur in older patients and carry poor prognosis. Glioblastoma (GBM) represents IDHwt astrocytoma grade IV (PMID: 36196752). The standard of care for GBM includes maximal safe resection followed by concurrent radiotherapy with an oral alkylating agent (temozolomide) and adjuvant temozolomide (PMID: 15758009). The promoter methylation status of O-6-methylguanine-DNA methyltransferase (MGMTp) is the most established molecular predictive marker for response to temozolomide and accordingly impacts overall survival in GBM (PMID: 15758010). Previous literature suggests that the median overall survival (OS) for patients with unmethylated MGMTp GBM is 14.11 months with a median progression-free survival (PFS) of 4.99 months. In contrast, the median OS for patients with methylated MGMTp GBM is 24.59 months with a PFS of 9.51 months (PMID: 33150334).  
+
+Despite the significance of MGMTp methylation status on survival in GBM, previous studies showed that the expression of MGMT based on immunohistochemistry (IHC) in GBM samples was variable and lacked association with survival (PMID: 18400046, PMID: 24252243). This is in part because non-tumor cells including endothelial cells and macrophages can express MGMT limiting accurate interpretations of the IHC stains. Furthermore, it has been observed that the MGMTp methylation status can change between paired primary and recurrent samples in 19-24% of cases, more commonly from methylated to unmethylated status but also possibly the other way around (PMID: 31766430) and (https://doi.org/10.1200/jco.2012.30.15_suppl.10543)
+
+Advanced technologies such as single-cell RNA (scRNA) sequencing and spatial transcriptomics have helped to elucidate the cell-type composition of cancer and its microenvironment. Recent scRNA/single-nucleus RNA sequencing (snRNA-seq) studies have demonstrated that GBM cells exhibit a high degree of heterogeneity and plasticity and seamless transitions between cellular states (PMID: 31327527 and PMID: 36539501). 
+
+In this paper, we use publicly available data from three scRNA/snRNA recent studies (PMID: 33577785, PMID: 31327527 and PMID: 36539501) to explore the and uncover details about MGMT expression in light of MGMTp methylation status at the single-cell level. 
+
+## Methods:
+
+We first used snRNA data from 18 treatment-naive GBM patients prospectively collected by the Clinical Proteomic Tumor Analysis Consortium (PMID: 33577785). The cohort is well annotated and includes information about MGMT promoter methylation status as determined by the MGMT-STP27 model from DNA methylation data. 
+
+The supplementary table "1-s2.0-S1535610821000507-mmc2" includes the clinical characteristic data and was downloaded from the original paper. The case IDs for the snRNA samples were downloaded from the Genomics Data Commons (GDC) Data Portal under the file "repository-cases-table.2024-04-10.tsv".
+
+The barcodes, features and matrices files were downloaded from GDC using UUIDs from the manifest file. Files then were downloaded using the GDC Transfer Data Tool into subfolders named after the case ids.
+
+```{r Extracting IDHwt sample IDs and downloading data, eval = FALSE}
+# Extract data for the IDHwt samples from supplementary table 1----
+library(readxl)
+library(dplyr)
+
+if (!file.exists("CPTAC_tumor_seurat.rds")) {
+
+additional_annotations <- "additional_annotations"
+CPTAC_sample_meta_path <- "1-s2.0-S1535610821000507-mmc2.xlsx"
+CPTAC_sample_meta <- read_excel(CPTAC_sample_meta_path, sheet = additional_annotations, col_names = TRUE)
+CPTAC_sample_meta <- dplyr::select(CPTAC_sample_meta, "case", "mgmt_methyl_stp27_prediction", "chr7_amp", "chr10_del", "EGFR_alter_status", "TERT_alter_status", "IDH1_alter_status")  
+CPTAC_scRNA_cases <- read.delim("repository-cases-table.2024-04-10.tsv")
+CPTAC_sample_meta <- dplyr::filter(CPTAC_sample_meta, case %in% CPTAC_scRNA_cases$Case.ID)
+CPTAC_sample_meta <- dplyr::filter(CPTAC_sample_meta, mgmt_methyl_stp27_prediction != "NA")
+CPTAC_sample_meta <- dplyr::filter(CPTAC_sample_meta, !(case %in% "C3N-01334")) # GDC only includes raw files (excluded for consistency)
+CPTAC_sample_meta$EGFR_alter_status <- ifelse(CPTAC_sample_meta$EGFR_alter_status == "NA", "No", "Yes")
+CPTAC_sample_meta$TERT_alter_status <- ifelse(CPTAC_sample_meta$TERT_alter_status == "NA", "No", "Yes")
+CPTAC_manifest <- read.delim("gdc_manifest.2024-04-11.txt")
+CPTAC_manifest <- CPTAC_manifest[grep("filtered_feature_bc_matrix.tar.gz$", CPTAC_manifest$filename), ]
+UUIDs <- CPTAC_manifest$id
+
+} else {
+# Load seurat object from the directory
+CPTAC_tumor_seurat <- readRDS("CPTAC_tumor_seurat.rds")
+}
+ 
+```
+
+## Create Seurat object from files
+
+
+```{r Create Seurat object, eval = FALSE}
+library(Seurat)
+library(Matrix)
+
+base_folder <- "GDC"
+if (!file.exists("CPTAC_tumor_seurat.rds")) {
+create_seurat_from_subfolders <- function(base_folder) {
+  subfolders <- list.dirs(base_folder, full.names = TRUE, recursive = FALSE)
+  seurat_objects <- list() # Initialize list to store Seurat objects
+  
+  for (subfolder in subfolders) {
+    matrix_file <- file.path(subfolder, if (file.exists(file.path(subfolder, "matrix.mtx.gz"))) "matrix.mtx.gz" else "matrix.mtx")
+    features_file <- file.path(subfolder, if (file.exists(file.path(subfolder, "features.tsv.gz"))) "features.tsv.gz" else "features.tsv")
+    barcodes_file <- file.path(subfolder, if (file.exists(file.path(subfolder, "barcodes.tsv.gz"))) "barcodes.tsv.gz" else "barcodes.tsv")
+    
+    if (file.exists(matrix_file) && file.exists(features_file) && file.exists(barcodes_file)) {
+      mtx <- readMM(matrix_file)
+      genes <- read.table(features_file, header = FALSE, sep = "\t")
+      duplicates <- genes[duplicated(genes$V2),]
+      genes$V4 <- ifelse(genes$V2 %in% duplicates$V2, genes$V1, genes$V2)
+      rownames(mtx) <- genes[, 4]
+      barcodes <- read.table(barcodes_file, header = FALSE, sep = "\t")
+      colnames(mtx) <- barcodes[, 1]
+      
+      # Create Seurat object for each matrix
+      seurat_obj <- CreateSeuratObject(counts = mtx)
+      
+      # Extract sample name from subfolder path
+      sample_name <- basename(subfolder)
+      
+      # Add sample name as metadata
+      seurat_obj$sample <- sample_name
+      
+      # Store Seurat object in list
+      seurat_objects[[sample_name]] <- seurat_obj
+    }
+  }
+
+  # Merge all the objects in the list if there are multiple objects
+  for (i in names(seurat_objects)) {
+    seurat_objects[[i]] <- RenameCells(seurat_objects[[i]],
+                                       add.cell.id = i)
+  }
+  merged_combined <- Reduce(function(x, y) merge(x, y), seurat_objects)
+  
+  return(merged_combined)
+}
+
+CPTAC_seurat <- create_seurat_from_subfolders(base_folder)
+
+} else {
+# Load seurat object from the directory
+CPTAC_tumor_seurat <- readRDS("CPTAC_tumor_seurat.rds")
+}
+
+```
+
+## Quality control and integration for the Seurat object
+
+Quality control for the Seurat object was completed per the Seurat workflow. Cells were selected for further analysis after excluding potential empty droplets (less than 200 genes per cell) and two few UMIs (<1000) and doublets or multiplets (cells with more than 10000 genes per cell). Low quality or dying cells were excluded by selecting cells with less than 10% mitochondrial genes. The data was then normalized and highly variable features were selected. The data was then scaled and dimensionality reductions were applied.
+
+
+```{r Quality control and filtering of the Seurat object, eval= FALSE}
+
+library(Seurat)
+
+if (!file.exists("CPTAC_tumor_seurat.rds")) {
+CPTAC_seurat <- PercentageFeatureSet(CPTAC_seurat, pattern = "^MT-", col.name = "percent.mt")
+CPTAC_seurat <- subset(CPTAC_seurat, subset = nFeature_RNA > 200 & nFeature_RNA < 10000 & nCount_RNA > 1000 & nCount_RNA <10000 & percent.mt < 10)
+CPTAC_seurat <- NormalizeData(CPTAC_seurat, normalization.method = "LogNormalize", scale.factor = 10000)
+CPTAC_seurat <- FindVariableFeatures(CPTAC_seurat, selection.method = "vst", nfeatures = 2000)
+CPTAC_seurat <- ScaleData(CPTAC_seurat)
+CPTAC_seurat <- RunPCA(CPTAC_seurat, verbose = FALSE)
+CPTAC_seurat <- RunUMAP(CPTAC_seurat, dims = 1:30, verbose = FALSE)
+CPTAC_seurat <- FindNeighbors(CPTAC_seurat, dims = 1:30, verbose = FALSE)
+CPTAC_seurat <- FindClusters(CPTAC_seurat, verbose = FALSE)
+
+} else {
+# Load seurat object from the directory
+CPTAC_tumor_seurat <- readRDS("CPTAC_tumor_seurat.rds")
+}
+```
+
+## Add cell meta-data and cell annotation:
+
+snrna_merged_v2020-08-05_cell_metadata.parquet was downloaded from the NCI Proteomic Data Commons. It included data regarding the MGMT promoter methylation status and other molecular characterizations of the samples (e.g. EGFR amplification status and TERT promoter methylation status). It also included the cell type annotation (tumor cells versus microenvironment) per the original paper's methods.
+
+```{r Add cell meta-data, eval = FALSE}
+
+library(arrow)
+library(dplyr)
+library(Seurat)
+
+if (!file.exists("CPTAC_tumor_seurat.rds")) {
+CPTAC_cells <- read_parquet('snrna_merged_v2020-08-05_cell_metadata.parquet')
+CPTAC_cells$cell_id_2 <- sub(".*_","", CPTAC_cells$cell_id)
+CPTAC_cells$sample_id_2 <- sub("_(.*)", "", CPTAC_cells$sample_id)
+CPTAC_cells <- dplyr::filter(CPTAC_cells, sample_id_2 %in% CPTAC_sample_meta$case)
+cell_names <- colnames(CPTAC_seurat)
+cell_names <- sub("^.*_([^_-]+)-.*", "\\1", cell_names)
+CPTAC_cells <- CPTAC_cells[match(cell_names, CPTAC_cells$cell_id_2), ]
+CPTAC_seurat$cell_type <- CPTAC_cells$cell_type
+CPTAC_meta_data <- CPTAC_seurat@meta.data
+merged <- merge(CPTAC_meta_data, CPTAC_sample_meta, by.x = "sample", by.y = "case")
+merged <- merged[match(CPTAC_meta_data$sample, merged$sample), ]
+CPTAC_seurat$chr7_amp <- merged$chr7_amp
+CPTAC_seurat$chr10_del <- merged$chr10_del
+CPTAC_seurat$MGMTp <- merged$mgmt_methyl_stp27_prediction
+CPTAC_seurat$EGFR_status <- merged$EGFR_alter_status
+CPTAC_seurat$TERTp <- merged$TERT_alter_status
+
+# Create CPTAC_tumor_seurat for tumor cells only
+Idents(CPTAC_seurat) <- CPTAC_seurat$cell_type
+CPTAC_tumor_seurat <- subset(CPTAC_seurat, idents = "Tumor")
+MGMTe <- FetchData(CPTAC_tumor_seurat, vars = "MGMT")
+## MGMTe ranged from 0-3.14 (median and mean 0)
+CPTAC_tumor_seurat$MGMTe <- ifelse(MGMTe > 0.1, "MGMT+", "MGMT-")  
+saveRDS(CPTAC_tumor_seurat, "CPTAC_tumor_seurat.rds")
+
+} else {
+# Load seurat object from the directory
+CPTAC_tumor_seurat <- readRDS("CPTAC_tumor_seurat.rds")
+}
+```
+
+## Percentages of MGMT expression per MGMTp status:
+MGMT promoter methylation data for the snRNA cohort was available for 13 patients (7 patients with unmethylated MGMT and 6 patients with methylated MGMT) that were included in this analysis. All patients had IDHwt GBM. The number of tumor cells per sample ranged from 1121-10996.
+
+MGMT expression data was extracted by Seurat and cells were classified into MGMT expressing (MGMT+) and MGMT none-expressing (MGMT-)
+
+MGMT expression ranged from 0.19%-1.43% in the MGMTp methylated group (median 0.82%), and from 2.17%-28.36% in the MGMTp unmethylated group (median 5.7%). It therefore appears that 2% cellular expression represents a reasonable cutoff to predict the MGMTp methylation status based on scRNA data.
+
+```{r Percentages of MGMT expression per MGMTp status}
+
+library(dplyr)
+library(DT)
+
+generate_table <- function() {
+  # Methylated percentages
+  Result1 <- round(table(CPTAC_tumor_seurat$MGMTe[which(CPTAC_tumor_seurat$MGMTe == "MGMT+" & CPTAC_tumor_seurat$sample == "C3L-02705")])/table(CPTAC_tumor_seurat$sample[CPTAC_tumor_seurat$sample == "C3L-02705"])*100,2)  
+  Result2 <- round(table(CPTAC_tumor_seurat$MGMTe[which(CPTAC_tumor_seurat$MGMTe == "MGMT+" & CPTAC_tumor_seurat$sample == "C3L-03405")])/table(CPTAC_tumor_seurat$sample[CPTAC_tumor_seurat$sample == "C3L-03405"])*100,2) 
+  Result3 <- round(table(CPTAC_tumor_seurat$MGMTe[which(CPTAC_tumor_seurat$MGMTe == "MGMT+" & CPTAC_tumor_seurat$sample == "C3L-03968")])/table(CPTAC_tumor_seurat$sample[CPTAC_tumor_seurat$sample == "C3L-03968"])*100,2) 
+  Result4 <- round(table(CPTAC_tumor_seurat$MGMTe[which(CPTAC_tumor_seurat$MGMTe == "MGMT+" & CPTAC_tumor_seurat$sample == "C3N-02181")])/table(CPTAC_tumor_seurat$sample[CPTAC_tumor_seurat$sample == "C3N-02181"])*100,2) 
+  Result5 <- round(table(CPTAC_tumor_seurat$MGMTe[which(CPTAC_tumor_seurat$MGMTe == "MGMT+" & CPTAC_tumor_seurat$sample == "C3N-02769")])/table(CPTAC_tumor_seurat$sample[CPTAC_tumor_seurat$sample == "C3N-02769"])*100,2) 
+  Result6 <- round(table(CPTAC_tumor_seurat$MGMTe[which(CPTAC_tumor_seurat$MGMTe == "MGMT+" & CPTAC_tumor_seurat$sample == "C3N-03184")])/table(CPTAC_tumor_seurat$sample[CPTAC_tumor_seurat$sample == "C3N-03184"])*100,2) 
+  
+  #Unmethylated percentages
+  Result7 <- round(table(CPTAC_tumor_seurat$MGMTe[which(CPTAC_tumor_seurat$MGMTe == "MGMT+" & CPTAC_tumor_seurat$sample == "C3N-01798")])/table(CPTAC_tumor_seurat$sample[CPTAC_tumor_seurat$sample == "C3N-01798"])*100,2) 
+  Result8 <- round(table(CPTAC_tumor_seurat$MGMTe[which(CPTAC_tumor_seurat$MGMTe == "MGMT+" & CPTAC_tumor_seurat$sample == "C3N-01816")])/table(CPTAC_tumor_seurat$sample[CPTAC_tumor_seurat$sample == "C3N-01816"])*100,2) 
+  Result9 <- round(table(CPTAC_tumor_seurat$MGMTe[which(CPTAC_tumor_seurat$MGMTe == "MGMT+" & CPTAC_tumor_seurat$sample == "C3N-02190")])/table(CPTAC_tumor_seurat$sample[CPTAC_tumor_seurat$sample == "C3N-02190"])*100,2) 
+  Result10 <- round(table(CPTAC_tumor_seurat$MGMTe[which(CPTAC_tumor_seurat$MGMTe == "MGMT+" & CPTAC_tumor_seurat$sample == "C3N-02783")])/table(CPTAC_tumor_seurat$sample[CPTAC_tumor_seurat$sample == "C3N-02783"])*100,2) 
+  Result11 <- round(table(CPTAC_tumor_seurat$MGMTe[which(CPTAC_tumor_seurat$MGMTe == "MGMT+" & CPTAC_tumor_seurat$sample == "C3N-02784")])/table(CPTAC_tumor_seurat$sample[CPTAC_tumor_seurat$sample == "C3N-02784"])*100,2) 
+  Result12 <- round(table(CPTAC_tumor_seurat$MGMTe[which(CPTAC_tumor_seurat$MGMTe == "MGMT+" & CPTAC_tumor_seurat$sample == "C3N-03186")])/table(CPTAC_tumor_seurat$sample[CPTAC_tumor_seurat$sample == "C3N-03186"])*100,2) 
+  Result13 <- round(table(CPTAC_tumor_seurat$MGMTe[which(CPTAC_tumor_seurat$MGMTe == "MGMT+" & CPTAC_tumor_seurat$sample == "C3N-03188")])/table(CPTAC_tumor_seurat$sample[CPTAC_tumor_seurat$sample == "C3N-03188"])*100,2) 
+  
+  # Methylated percentages
+  methylated <- data.frame(
+    row.names = c("C3L-02705", "C3L-03405", "C3L-03968", "C3N-02181", "C3N-02769", "C3N-03184"),
+    "MGMTe" = c(Result1, Result2, Result3, Result4, Result5, Result6),
+    "MGMTp" = "Methylated"
+  )
+  colnames(methylated) <- c("MGMT expression %", "MGMT promoter status")
+  
+  # Unmethylated percentages
+  unmethylated <- data.frame(
+    row.names = c("C3N-01798", "C3N-01816", "C3N-02190", "C3N-02783", "C3N-02784", "C3N-03186", "C3N-03188"),
+    "MGMTe" = c(Result7, Result8, Result9, Result10, Result11, Result12, Result13),
+    "MGMTp" = "Unmethylated"
+  )
+  colnames(unmethylated) <- c("MGMT expression %", "MGMT promoter status")
+  
+  # Combine the methylated and unmethylated data frames
+  combined_data <- bind_rows(methylated, unmethylated)
+
+  datatable(combined_data, 
+          extensions = c('KeyTable', "FixedHeader"), 
+          filter = 'top',
+          options = list(keys = TRUE, 
+                         searchHighlight = TRUE, 
+                         pageLength = 13))
+  }
+
+# Call the function to generate the table
+generate_table()
+
+
+```
+## Add cell cycle data and evaluate MGMT expressing cells
+
+By applying cell-cycle scores per Seurat methods, interestingly 80.6% of MGMT+ cells are non-cycling versus 56.8% of MGMT- cells.
+
+```{r Add cell cycle data and evaluate MGMT expressing cells}
+
+library(Seurat)
+
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+CPTAC_tumor_seurat <- CellCycleScoring(CPTAC_tumor_seurat, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+CrossTable_1 <- table(CPTAC_tumor_seurat$Phase, CPTAC_tumor_seurat$MGMTe)
+print(prop.table(CrossTable_1, margin = 2) * 100)  
+
+```
+
+## Neftel
+
+We then aimed to validate the above findings by evaluating a different dataset by Neftel et al (PMID: 31327527). The pre-processed matrix file was downloaded from the 3CA database (PMID: 37258682) where the quality control and filtering had already been done.
+
+1-s2.0-S0092867419306877-mmc1 supplementary table was downloaded from the original paper and included the clinical characteristics for the cohort including the MGMT promoter methylation status (method not specified).
+
+
+```{r Neftel Extract IDHwt adult samples, eval = FALSE}
+
+if (!file.exists("Neftel_tumor_seurat.rds")) {
+
+library(readxl)
+library(dplyr)
+library(Matrix)
+library(Seurat)
+
+Neftel_meta_data <- read_excel("Neftel/1-s2.0-S0092867419306877-mmc1.xlsx", skip = 3, col_names = TRUE)
+Neftel_meta_data <- dplyr::filter(Neftel_meta_data, ...1 == "Adult" & Diagnosis == "GBM (IV)" & ! is.na(MGMT))
+Neftel_mtx <- readMM("Neftel/Exp_data_TPM.mtx")
+Neftel_genes <- read.table("Neftel/Genes.txt", header = FALSE)
+Neftel_barcodes <- read.csv("Neftel/Cells.csv", header = TRUE, sep = ",")
+rownames(Neftel_mtx) <- Neftel_genes[, 1]
+colnames(Neftel_mtx) <- Neftel_barcodes[, 1]
+
+} else {
+# Load seurat object from the directory
+Neftel_tumor_seurat <- readRDS("Neftel_tumor_seurat.rds")
+}
+```
+
+The data was then normalized and highly variable features were selected. The data was then scaled and dimensionality reductions were applied. 
+
+```{r Neftel processing, eval = FALSE}
+
+library(Seurat)
+
+if (!file.exists("Neftel_tumor_seurat.rds")) {
+Neftel_seurat <- CreateSeuratObject(counts = Neftel_mtx)
+Neftel_seurat <- NormalizeData(Neftel_seurat, normalization.method = "LogNormalize", scale.factor = 10000)
+Neftel_seurat <- FindVariableFeatures(Neftel_seurat, selection.method = "vst", nfeatures = 2000)
+Neftel_seurat <- ScaleData(Neftel_seurat)
+Neftel_seurat <- RunPCA(Neftel_seurat, verbose = FALSE)
+Neftel_seurat <- RunUMAP(Neftel_seurat, dims = 1:30, verbose = FALSE)
+Neftel_seurat <- FindNeighbors(Neftel_seurat, dims = 1:30, verbose = FALSE)
+Neftel_seurat <- FindClusters(Neftel_seurat, verbose = FALSE)
+
+cell_names <- colnames(Neftel_seurat)
+Neftel_barcodes <- Neftel_barcodes[match(cell_names, Neftel_barcodes$cell_name), ]
+Neftel_seurat$sample <- Neftel_barcodes$sample
+Neftel_seurat$malignant <- Neftel_barcodes$malignant
+IDHwt_samples <- Neftel_sample_meta$Name
+Idents(Neftel_seurat) <- Neftel_seurat$sample
+# Now Neftel_seurat has 23686 rows and 5742 columns
+Neftel_seurat <- subset(Neftel_seurat, idents = IDHwt_samples)
+Neftel_meta_data <- Neftel_seurat@meta.data
+merged <- merge(Neftel_meta_data, Neftel_sample_meta, by.x = "sample", by.y = "Name")
+merged <- merged[match(Neftel_meta_data$sample, merged$sample), ]
+Neftel_seurat$MGMTp <- merged$MGMT
+Neftel_seurat$EGFR_status <- merged$EGFR
+
+# Create Neftel_tumor_seurat for tumor cells only
+Idents(Neftel_seurat) <- Neftel_seurat$malignant
+Neftel_tumor_seurat <- subset(Neftel_seurat, idents = "yes")
+MGMTe <- FetchData(Neftel_tumor_seurat, vars = "MGMT")
+Neftel_tumor_seurat$MGMTe <- ifelse(MGMTe > 0.1, "MGMT+", "MGMT-")  
+saveRDS(Neftel_tumor_seurat, "Neftel_tumor_seurat.rds")
+
+} else {
+# Load seurat object from the directory
+Neftel_tumor_seurat <- readRDS("Neftel_tumor_seurat.rds")
+}
+```
+
+## Neftel: Percentages of MGMT expression per MGMTp status:
+MGMT expression ranged from 0-1.26% in the MGMTp methylated group (median 0.59%), and from 0.3-27.67% in the MGMTp unmethylated group (median 12.44%).
+
+Three unmethylated samples (out of 16) did not follow the rule of MGMT+ cells >2% (0.3, 0.68, 0.73). Therefore, the <2% cutoff rule has 100% sensitivity and 81.25% specificity to predict unmethylated MGMTp status.
+
+It is unclear if this is due to simply inaccurate annotation of these samples. Moreover, the Neftel paper did not specify the method used to detect MGMTp methylation. Or could it be that truly MGMTp unmethylated samples can have a low MGMT expression status? Could this explain why some unmethylated MGMTp patients surpass the expected survival? Bigger longitudinal studies that coorelate MGMT expression based on scRNA data with survival are needed to evaluate the prognostic significance of MGMT expression on survival.
+
+```{r Percentages of MGMT expression per MGMTp status}
+
+library(dplyr)
+library(DT)
+
+generate_table <- function() {
+  # Methylated percentages
+  Result1 <- round(table(Neftel_tumor_seurat$MGMTe[which(Neftel_tumor_seurat$MGMTe == "MGMT+" & Neftel_tumor_seurat$sample == "MGH66")])/table(Neftel_tumor_seurat$sample[Neftel_tumor_seurat$sample == "MGH66"])*100,2)  
+  Result2 <- round(table(Neftel_tumor_seurat$MGMTe[which(Neftel_tumor_seurat$MGMTe == "MGMT+" & Neftel_tumor_seurat$sample == "MGH100")])/table(Neftel_tumor_seurat$sample[Neftel_tumor_seurat$sample == "MGH100"])*100,2) 
+  Result3 <- round(table(Neftel_tumor_seurat$MGMTe[which(Neftel_tumor_seurat$MGMTe == "MGMT+" & Neftel_tumor_seurat$sample == "MGH128")])/table(Neftel_tumor_seurat$sample[Neftel_tumor_seurat$sample == "MGH128"])*100,2) 
+  Result4 <- sum(Neftel_tumor_seurat$MGMTe == "MGMT+" & Neftel_tumor_seurat$sample == "MGH152")/table(Neftel_tumor_seurat$sample[Neftel_tumor_seurat$sample == "MGH152"])*100 
+
+  #Unmethylated percentages
+  Result5 <- round(table(Neftel_tumor_seurat$MGMTe[which(Neftel_tumor_seurat$MGMTe == "MGMT+" & Neftel_tumor_seurat$sample == "MGH101")])/table(Neftel_tumor_seurat$sample[Neftel_tumor_seurat$sample == "MGH101"])*100,2) 
+  Result6 <- round(table(Neftel_tumor_seurat$MGMTe[which(Neftel_tumor_seurat$MGMTe == "MGMT+" & Neftel_tumor_seurat$sample == "MGH102")])/table(Neftel_tumor_seurat$sample[Neftel_tumor_seurat$sample == "MGH102"])*100,2) 
+  Result7 <- round(table(Neftel_tumor_seurat$MGMTe[which(Neftel_tumor_seurat$MGMTe == "MGMT+" & Neftel_tumor_seurat$sample == "MGH104")])/table(Neftel_tumor_seurat$sample[Neftel_tumor_seurat$sample == "MGH104"])*100,2) 
+  Result8 <- round(table(Neftel_tumor_seurat$MGMTe[which(Neftel_tumor_seurat$MGMTe == "MGMT+" & Neftel_tumor_seurat$sample == "MGH105")])/table(Neftel_tumor_seurat$sample[Neftel_tumor_seurat$sample == "MGH105"])*100,2) 
+  Result9 <- round(table(Neftel_tumor_seurat$MGMTe[which(Neftel_tumor_seurat$MGMTe == "MGMT+" & Neftel_tumor_seurat$sample == "MGH106")])/table(Neftel_tumor_seurat$sample[Neftel_tumor_seurat$sample == "MGH106"])*100,2) 
+  Result10 <- round(table(Neftel_tumor_seurat$MGMTe[which(Neftel_tumor_seurat$MGMTe == "MGMT+" & Neftel_tumor_seurat$sample == "MGH110")])/table(Neftel_tumor_seurat$sample[Neftel_tumor_seurat$sample == "MGH110"])*100,2) 
+  Result11 <- round(table(Neftel_tumor_seurat$MGMTe[which(Neftel_tumor_seurat$MGMTe == "MGMT+" & Neftel_tumor_seurat$sample == "MGH113")])/table(Neftel_tumor_seurat$sample[Neftel_tumor_seurat$sample == "MGH113"])*100,2) 
+  Result12 <- round(table(Neftel_tumor_seurat$MGMTe[which(Neftel_tumor_seurat$MGMTe == "MGMT+" & Neftel_tumor_seurat$sample == "MGH115")])/table(Neftel_tumor_seurat$sample[Neftel_tumor_seurat$sample == "MGH115"])*100,2) 
+  Result13 <- round(table(Neftel_tumor_seurat$MGMTe[which(Neftel_tumor_seurat$MGMTe == "MGMT+" & Neftel_tumor_seurat$sample == "MGH121")])/table(Neftel_tumor_seurat$sample[Neftel_tumor_seurat$sample == "MGH121"])*100,2) 
+  Result14 <- round(table(Neftel_tumor_seurat$MGMTe[which(Neftel_tumor_seurat$MGMTe == "MGMT+" & Neftel_tumor_seurat$sample == "MGH122")])/table(Neftel_tumor_seurat$sample[Neftel_tumor_seurat$sample == "MGH122"])*100,2) 
+  Result15 <- round(table(Neftel_tumor_seurat$MGMTe[which(Neftel_tumor_seurat$MGMTe == "MGMT+" & Neftel_tumor_seurat$sample == "MGH124")])/table(Neftel_tumor_seurat$sample[Neftel_tumor_seurat$sample == "MGH124"])*100,2) 
+  Result16 <- round(table(Neftel_tumor_seurat$MGMTe[which(Neftel_tumor_seurat$MGMTe == "MGMT+" & Neftel_tumor_seurat$sample == "MGH125")])/table(Neftel_tumor_seurat$sample[Neftel_tumor_seurat$sample == "MGH125"])*100,2) 
+  Result17 <- round(table(Neftel_tumor_seurat$MGMTe[which(Neftel_tumor_seurat$MGMTe == "MGMT+" & Neftel_tumor_seurat$sample == "MGH129")])/table(Neftel_tumor_seurat$sample[Neftel_tumor_seurat$sample == "MGH129"])*100,2) 
+  Result18 <- round(table(Neftel_tumor_seurat$MGMTe[which(Neftel_tumor_seurat$MGMTe == "MGMT+" & Neftel_tumor_seurat$sample == "MGH136")])/table(Neftel_tumor_seurat$sample[Neftel_tumor_seurat$sample == "MGH136"])*100,2) 
+  Result19 <- round(table(Neftel_tumor_seurat$MGMTe[which(Neftel_tumor_seurat$MGMTe == "MGMT+" & Neftel_tumor_seurat$sample == "MGH143")])/table(Neftel_tumor_seurat$sample[Neftel_tumor_seurat$sample == "MGH143"])*100,2) 
+  Result20 <- round(table(Neftel_tumor_seurat$MGMTe[which(Neftel_tumor_seurat$MGMTe == "MGMT+" & Neftel_tumor_seurat$sample == "MGH151")])/table(Neftel_tumor_seurat$sample[Neftel_tumor_seurat$sample == "MGH151"])*100,2) 
+  
+  
+  # Methylated percentages
+  methylated <- data.frame(
+    row.names = c("MGH66", "MGH100", "MGH128", "MGH152"),
+    "MGMTe" = c(Result1, Result2, Result3, Result4),
+    "MGMTp" = "Methylated"
+  )
+  colnames(methylated) <- c("MGMT expression %", "MGMT promoter status")
+  
+  # Unmethylated percentages
+  unmethylated <- data.frame(
+    row.names = c("MGH101", "MGH102", "MGH104", "MGH105", "MGH106", "MGH110", "MGH113", "MGH115", "MGH121", "MGH122", "MGH124", "MGH125", "MGH129", "MGH136", "MGH143", "MGH151"),
+    "MGMTe" = c(Result5, Result6, Result7, Result8, Result9, Result10, Result11, Result12, Result13, Result14, Result15, Result16, Result17, Result18, Result19, Result20),
+    "MGMTp" = "Unmethylated"
+  )
+  colnames(unmethylated) <- c("MGMT expression %", "MGMT promoter status")
+  
+  # Combine the methylated and unmethylated data frames
+  combined_data <- bind_rows(methylated, unmethylated)
+  
+  datatable(combined_data, 
+            extensions = c('KeyTable', "FixedHeader"), 
+            filter = 'top',
+            options = list(keys = TRUE, 
+                           searchHighlight = TRUE, 
+                           pageLength = 13))
+}
+
+# Call the function to generate the table
+generate_table()
+
+
+
+```
+
+By applying cell-cycle scores per Seurat methods, 63.7% of MGMT+ cells are non-cycling versus 69.98% of MGMT- cells.
+
+```{r Add cell cycle data and evaluate MGMT expressing cells}
+
+library(Seurat)
+
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+Neftel_tumor_seurat <- CellCycleScoring(Neftel_tumor_seurat, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+CrossTable_2 <- table(Neftel_tumor_seurat$Phase, Neftel_tumor_seurat$MGMTe)
+print(prop.table(CrossTable_2, margin = 2) * 100)  
+
+```
+
+## Wang
+
+We finally applied the above findings to the study by Wang, et al (PMID: 36539501). The study profiled 86 primary-recurrent patient-matched paired GBM specimens with snRNA sequencing. 76 of these samples were IDHwt GBM. The study did not include MGMTp methylation data for the samples. However, we were interested in the change of MGMT expression between primary and recurrent samples. The data was downloaded from GEO using the accession number GSE174554.
+
+```{r Create Wang Seurat object, eval=FALSE}
+
+library(Seurat)
+library(purrr)
+library(Matrix)
+library(DropletUtils)
+
+if (!file.exists("Wang2022_seurat.rds")) {
+setwd("/oceanus/users/ixa123/scRNA_astrocytoma")
+base_folder <- "GSE174554"
+
+create_seurat_from_subfolders <- function(base_folder) {
+  subfolders <- list.dirs(base_folder, full.names = TRUE, recursive = FALSE)
+  seurat_objects <- list() # Initialize list to store Seurat objects
+  
+  for (subfolder in subfolders) {
+    matrix_file <- file.path(subfolder, if (file.exists(file.path(subfolder, "matrix.mtx.gz"))) "matrix.mtx.gz" else "matrix.mtx")
+    features_file <- file.path(subfolder, if (file.exists(file.path(subfolder, "features.tsv.gz"))) "features.tsv.gz" else "features.tsv")
+    barcodes_file <- file.path(subfolder, if (file.exists(file.path(subfolder, "barcodes.tsv.gz"))) "barcodes.tsv.gz" else "barcodes.tsv")
+    
+    if (file.exists(matrix_file) && file.exists(features_file) && file.exists(barcodes_file)) {
+      mtx <- readMM(matrix_file)
+      genes <- read.table(features_file, header = FALSE, sep = "\t")
+      rownames(mtx) <- genes[, 1]
+      barcodes <- read.table(barcodes_file, header = FALSE, sep = "\t")
+      colnames(mtx) <- barcodes[, 1]
+      
+      # Create Seurat object for each matrix
+      seurat_obj <- CreateSeuratObject(counts = mtx)
+      
+      # Extract sample name from subfolder path
+      sample_name <- basename(subfolder)
+      
+      # Add sample name as metadata
+      seurat_obj$sample <- sample_name
+      
+      # Store Seurat object in list
+      seurat_objects[[sample_name]] <- seurat_obj
+    }
+  }
+
+  # Merge all the objects in the list if there are multiple objects
+  for (i in names(seurat_objects)) {
+    seurat_objects[[i]] <- RenameCells(seurat_objects[[i]],
+                                       add.cell.id = i)
+  }
+  merged_combined <- Reduce(function(x, y) merge(x, y), seurat_objects)
+  
+  return(merged_combined)
+}
+
+Wang2022_seurat <- create_seurat_from_subfolders(base_folder)
+
+} else {
+# Load seurat object from the directory
+Wang2022_seurat <- readRDS("Wang2022_seurat.rds")
+}
+
+```    
+
+## Quality control and integration for the Seurat object
+
+Quality control for the Seurat object was completed per the Seurat workflow. Cells were selected for further analysis after excluding potential empty droplets (less than 200 genes per cell) and two few UMIs (<1000) and doublets or multiplets (cells with more than 10000 genes per cell). Low quality or dying cells were excluded by selecting cells with less than 10% mitochondrial genes. The data was then normalized and highly variable features were selected. The data was then scaled and dimensionality reductions were applied. The updated seurat object includes 33694 rows (genes) and 147450 columns (cells).
+
+```{r Quality control for the seurat object, eval=FALSE}
+
+library(Seurat)
+if (!file.exists("Wang2022_seurat.rds")) {
+Wang2022_seurat <- PercentageFeatureSet(Wang2022_seurat, pattern = "^MT-", col.name = "percent.mt")
+Wang2022_seurat <- subset(Wang2022_seurat, subset = nFeature_RNA > 200 & nFeature_RNA < 10000 & nCount_RNA > 1000 & nCount_RNA <10000 & percent.mt < 10)
+# remove layers which dimension is null in order to normalize
+layersList <- lapply(Wang2022_seurat@assays$RNA@layers,function(x){dim(x)})
+Wang2022_seurat@assays$RNA@layers[names(layersList[sapply(layersList, is.null)])] <- NULL
+Wang2022_seurat <- NormalizeData(Wang2022_seurat, normalization.method = "LogNormalize", scale.factor = 10000)
+Wang2022_seurat <- FindVariableFeatures(Wang2022_seurat, selection.method = "vst", nfeatures = 2000)
+Wang2022_seurat <- ScaleData(Wang2022_seurat)
+Wang2022_seurat <- RunPCA(Wang2022_seurat, verbose = FALSE)
+Wang2022_seurat <- RunUMAP(Wang2022_seurat, dims = 1:30, verbose = FALSE)
+Wang2022_seurat <- FindNeighbors(Wang2022_seurat, dims = 1:30, verbose = FALSE)
+Wang2022_seurat <- FindClusters(Wang2022_seurat, verbose = FALSE)
+
+} else {
+# Load seurat object from the directory
+Wang2022_seurat <- readRDS("Wang2022_seurat.rds")
+}
+
+```
+
+## Attach the cellular meta-data to Seurat 
+
+Supplementary tables were downloaded from the original paper: https://www.ncbi.nlm.nih.gov/pmc/articles/PMC9767870/
+
+```{r Add Wang meta-data, eval = FALSE}
+
+library(readxl)
+library(dplyr)
+
+if (!file.exists("Wang2022_seurat.rds")) {
+  
+setwd("/oceanus/users/ixa123/scRNA_astrocytoma")
+Wang_2022_path <- "43018_2022_475_MOESM2_ESM.xlsx"
+Table_1_tab <- "Table 1"
+Table_1 <- read_excel(Wang_2022_path, sheet = Table_1_tab, col_names = TRUE)
+Table_1 <- Table_1[Table_1$IDH == "IDH wildtype",]
+Table_1 <- Table_1[!is.na(Table_1$`snRNA-seq`), ]
+sample_df <- read_xls("/oceanus/users/ixa123/scRNA_astrocytoma/samples.xls", col_names = TRUE) 
+sample_df <- merge(sample_df, Table_1[, c("ID", "Pair#")], by = "ID", all.x = TRUE)
+colnames(sample_df)[which(colnames(sample_df) == "Pair#")] <- "Pair"
+rm(Table_1)
+
+} else {
+# Load seurat object from the directory
+Wang2022_seurat <- readRDS("Wang2022_seurat.rds")
+}
+
+```
+
+"GSE174554_Tumor_normal_metadata.txt" was downloaded from (https://www.ncbi.nlm.nih.gov/geo/) using GEO accession GSE174554. The file contains the designation of "Normal" versus "Tumor" cells as per Wang et al.
+
+```{r Attach the cellular meta-data to Seurat, eval=FALSE}
+library(Seurat)
+library(readxl)
+
+if (!file.exists("Wang2022_seurat.rds")) {
+setwd("/oceanus/users/ixa123/scRNA_astrocytoma")
+Wang_cells <- read.table("GSE174554_Tumor_normal_metadata.txt", sep="\t", header = T)
+split_columns <- strsplit(Wang_cells$Sample, "[ ]")
+
+# Create a new data frame with three columns
+Wang_cells <- data.frame(
+  sample = sapply(strsplit(as.character(Wang_cells$Sample), "_"), "[", 1),
+  barcode = sapply(split_columns, `[`, 1),
+  cell_type = sapply(split_columns, `[`, 2)
+)
+
+## Add meta-data to the seurat object ----
+cell_names <- colnames(Wang2022_seurat)
+split_columns_2 <- strsplit(cell_names, "[-\\.]")
+cell_names <- data.frame(
+  barcode = sapply(split_columns_2, '[', 1)
+)
+
+# Remove "." or "-" from the names
+split_columns_3 <- strsplit(Wang_cells$barcode, "[-\\.]")
+Wang_cells$barcode <- sapply(split_columns_3, '[', 1)
+
+# some cells have v2, remove to match colnames(Wang2022_seurat)
+Wang_cells$barcode <- gsub("v2_", "_", Wang_cells$barcode)
+
+#SF11981 is missing from GSE174554_Tumor_normal_metadata.txt (1302 cells)
+
+# There are 21 cells that had the same barcode but different "Tumor/Normal" designation between v1 and v2
+subset_dfs <- list()
+
+# Iterate through each unique barcode
+unique_barcodes <- unique(Wang_cells$barcode)
+for (barcode in unique_barcodes) {
+  # Extract rows with the current barcode
+  rows_with_barcode <- Wang_cells[Wang_cells$barcode == barcode, ]
+  
+  # If there are multiple rows with the same barcode
+  if (nrow(rows_with_barcode) > 1) {
+    # Check if there are discrepancies in cell_type values
+    if (length(unique(rows_with_barcode$cell_type)) > 1) {
+      # Create a subset data frame with the elements having different cell_type values
+      subset_dfs[[length(subset_dfs) + 1]] <- rows_with_barcode
+    }
+  }
+}
+# Combine all subset data frames into a single data frame
+result_df <- do.call(rbind, subset_dfs)
+
+unique_barcodes_discrepancies <- unique(result_df$barcode)
+
+# Subset Wang_cells to keep rows with barcodes not in result_df
+Wang_cells <- subset(Wang_cells, !(barcode %in% unique_barcodes_discrepancies))
+
+Wang_cells <- Wang_cells[match(cell_names$barcode, Wang_cells$barcode), ]
+Wang2022_seurat$cell_type <- Wang_cells$cell_type
+
+# Add molecular meta-data 
+Wang2022_seurat@meta.data$barcode <- colnames(Wang2022_seurat) # for some reason, meta.data$barcode was missing a lot
+merged_data <- merge(Wang2022_seurat@meta.data, sample_df, by.x = "sample", by.y = "ID", all.x = TRUE)
+merged_data <- merged_data[match(Wang2022_seurat@meta.data$sample, merged_data$sample), ]
+Wang2022_seurat@meta.data$Stage <- merged_data$Stage
+Wang2022_seurat@meta.data$Pair <- merged_data$`Pair#`
+Wang2022_seurat@meta.data$EGFRamp <- merged_data$EGFRamp
+Wang2022_seurat@meta.data$EGFRmut <- merged_data$EGFRmut
+Wang2022_seurat@meta.data$EGFRany <- merged_data$EGFRany
+Wang2022_seurat@meta.data$Chr7 <- merged_data$Chr7
+Wang2022_seurat@meta.data$Chr10 <- merged_data$Chr10
+Wang2022_seurat@meta.data$TERT <- merged_data$TERT
+Wang2022_seurat@meta.data$NF1 <- merged_data$NF1
+Wang2022_seurat@meta.data$Chr7_10 <- merged_data$Chr7_10
+saveRDS(Wang2022_seurat, "Wang2022_seurat.rds")
+
+} else {
+# Load seurat object from the directory
+Wang2022_seurat <- readRDS("Wang2022_seurat.rds")
+}
+```
+
+Of the 21 paired samples, MGMT expression decreased at recurrence in 11 pairs and increased in 10 pairs. MGMTp methylation status changed from unmethylated to methylated in 4/21 pairs (19%) and from methylated to unmethylated in 4/21 pairs (19%). 
+
+```{r Expression of MGMT in the Wang cohort}
+
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(DT)
+
+Idents(Wang2022_seurat) <- Wang2022_seurat$cell_type
+Wang_tumor_seurat <- subset(Wang2022_seurat, idents = "Tumor")
+
+Paired_df <- sample_df %>%
+  filter(Pair != "NA") %>%
+  group_by(Pair) %>%
+  filter(n() >= 2) %>%
+  ungroup() %>%
+  as.data.frame()
+
+# Remove pairs where one samples has < 10 malignant cells
+
+Paired_df <- Paired_df[!Paired_df$ID %in% c("SF9871", "SF7025", "SF12115", "SF12751", "SF6809", "SF10108"),]
+
+MGMT_Wang <- FetchData(Wang_tumor_seurat, vars = "MGMT")
+Wang_tumor_seurat$MGMTe <- ifelse(MGMT_Wang > 0.1, "MGMT+", "MGMT-")
+rm(MGMT_Wang)
+Wang_MGMT_df <- as.data.frame(table(Wang_tumor_seurat$sample, Wang_tumor_seurat$MGMTe))
+colnames(Wang_MGMT_df) <- c("ID", "MGMTe", "Count")
+Wang_MGMT_df <- reshape(Wang_MGMT_df, idvar = "ID", timevar = "MGMTe", direction = "wide")
+Wang_MGMT_df$MGMTpercentage <- round(Wang_MGMT_df$`Count.MGMT+` / (Wang_MGMT_df$`Count.MGMT+` + Wang_MGMT_df$`Count.MGMT-`) *100,2)
+Wang_MGMT_df <- merge(Paired_df[,c("ID","Stage","Pair")], Wang_MGMT_df[,c("ID","MGMTpercentage")], by = "ID", all.x = FALSE)
+# SF12754 was a triplicate
+Wang_MGMT_df <- Wang_MGMT_df[Wang_MGMT_df$ID != "SF12754",]
+Wang_MGMT_df <- Wang_MGMT_df %>%
+  group_by(Pair) %>%
+  filter(n() == 2) %>%
+  ungroup()
+Wang_MGMT_df <- Wang_MGMT_df %>%
+  arrange(Pair, Stage) %>%
+  group_by(Pair) %>%
+  mutate(Change = ifelse(diff(MGMTpercentage) > 0, "Up", "Down")) %>%
+  ungroup()
+
+table(Wang_MGMT_df$Change)/2
+
+datatable(Wang_MGMT_df, 
+            extensions = c('KeyTable', "FixedHeader"), 
+            filter = 'top',
+            options = list(keys = TRUE, 
+                           searchHighlight = TRUE, 
+                           pageLength = 13))
+
+ggplot(Wang_MGMT_df, aes(x = Stage, y = MGMTpercentage, group = Pair)) +
+  geom_point(aes(color = Change), size = 3) +
+  geom_line(aes(color = Change)) +
+  theme_minimal() +
+  labs(
+    title = "Ladder plot of MGMT expression percentage between primary and recurrent samples",
+    x = "",
+    y = "MGMT expression percentage",
+    color = "Change"
+  ) +
+  scale_x_discrete(limits = c("Primary", "Recurrent"))
+
+```
+
+## Find differentially expressed markers between MGMT+ and MGMT- cells
+
+We then used Seurat's FindMarkers function to find differentially expressed genes between cells expressing MGMT and cells not expressing MGMT. Supplementary table 1 includes the results of this analysis. 
+
+Supplementary table 2 includes 39 genes that were differentially expressed in MGMT+ cells and were identified using the following criteria: expressed in more than 50% of MGMT+ cells, adjusted p value (Wilcoxcin rank sum test) of 0.001 and log fold change of 1 in comparison to MGMT- cells.
+
+```{r Differentially expressed markers between MGMT+ and MGMT- cells, eval=FALSE}
+
+library(Seurat)
+library(EnhancedVolcano)
+
+if (!file.exists("MGMT_markers.tsv") {
+
+# Find markers
+Idents(CPTAC_tumor_seurat) <- CPTAC_tumor_seurat$MGMTp
+CPTAC_unmethylated_seurat <- subset(CPTAC_tumor_seurat, idents = "FALSE")
+Idents(CPTAC_unmethylated_seurat) <- CPTAC_unmethylated_seurat$MGMTe
+CPTAC_unmethylated_seurat <- NormalizeData(CPTAC_unmethylated_seurat)
+MGMT_markers <- FindMarkers(CPTAC_unmethylated_seurat, ident.1 = "MGMT-", ident.2 = "MGMT+")
+MGMT_markers$gene <- rownames(MGMT_markers)
+write.table(MGMT_markers,"MGMT_markers.tsv", sep = "\t", col.names= TRUE, row.names = FALSE, quote = FALSE)
+
+} else {
+MGMT_markers <- read.delim("MGMT_markers.tsv")
+}
+
+```
+
+## Functional enrichment analysis of differentially expressed genes
+
+Gene Set Enrichment Analysis (GSEA) of the differentially expressed genes between MGMT+ and MGMT- cells was applied. Intrestingly, the VERHAAK_GLIOBLASTOMA_PRONEURAL set had the highest normalized enrichment score (NES) in the MGMT negative cells (NES 3.49, adjusted p value 2.173636e-08). On the other hand, the VERHAAK_GLIOBLASTOMA_ MESENCHYMAL set had the highest NES in the MGMT+ cells (NES -3.2, adjusted p value 2.173636e-08). The WP_DNA_REPAIR_PATHWAYS_FULL_NETWORK (genes: MGMT, POLE4, FANCF, CETN2, DDB2) set was enirched in the MGMT+ cells (NES -1.71, adjusted p value 0.042)
+
+Mesenchymal (data under myGSEA.df):
+CD4/PTPN22/MRC2/LAIR1/FHOD1/CTSC/HEXB/MGAT1/PIGP/TMBIM1/SLC16A3/TNFRSF1A/LHFPL2/CLEC2B/TLR2/SLC11A1/FMNL1/TES/TNFAIP3/RBKS/THEMIS2/PLK3/TRADD/CNN2/CD2AP/EMP3/ITGA5/CPQ/RHOG/ANXA2/CAVIN1/AMPD3/MS4A4A/ANXA4/IQGAP1/NCF2/RBM47/RBMS1/ENG/CAST/GCNT1/SP100/EFEMP2/DCBLD2/TNFRSF1B/CYTIP/TNFRSF11A/COL1A1/FNDC3B/LAPTM5/CYBRD1/C5AR1/IL1R1/MAN1A1/CASP4/TLR4/TRIM22/SHC1/SYNGR2/ITGAM/ANXA1/RAB32/MYO1F/LCP2/MVP/CTSZ/C1orf54/ITGA4/ALOX5/WWTR1/COPZ2/CASP1/MGST2/IL15RA/P4HA2/KYNU/PTPRC/TIMP1/ITGB2/SERPINA1/LTBP2/S100A4/MYOF/PLAUR/LCP1/STAT6/TNFAIP8/MSR1/COL8A2/IL4R/BNC2/BLVRB/S100A11/SEC24D/CHI3L1/S100A13/CD14/LGALS1/TCIRG1/RRAS/PTGER4/YAP1/TRPM2/CLIC1/SIGLEC9/CTSB/SRPX2/ALDH3B1/LY75/FPR3/TGFBR2/ARSJ/HFE/NPC2/VAMP5/ACP3/ICAM3/IGFBP6/LY96/CASP8/RUNX2/SQOR/CLCF1/RAB11FIP1/PROCR/DAB2/RAC2/TRIM38/TGFBI/IFI30/FOLR2/TEC
+
+Proneural:
+CELF3/PAK5/DCX/DUSP26/MYT1/DLL3/TOX3/ASCL1/TMEM35A/FERMT1/SLCO5A1/NKAIN1/CNTN1/PLAAT1/KLRC4/SOX11/DPYSL4/PDE10A/INAVA/SEZ6L/PODXL2/GABRA3/LRRTM4/NRXN2/GNG4/ZNF711/NRXN1/ERBB3/CA10/MMP16/BCAN/SCN3A/MPPED2/STMN4/FLRT1/PPM1E/FHOD3/ATP1A3/SOX4/MAST1/NOL4/HOXD3/C1QL1/CSPG5/SOX10/IL1RAPL1/MAP2/CDC25A/KIF21B/MTSS1/PLCB4/SORCS3/SCG3/REEP1/MARCKSL1/DGKI/NCALD/ZFP69B/BCL7A/MMP15/DPP6/ZNF286A/NLGN3/BEX1/CDK5R1/STMN1/ZNF821/CRB1/MAPT/CRMP1/MIR9-1HG/CSNK1E/SATB1/GPR17/RALGPS2/SRGAP3/HMGB3/RALGPS1/OLIG2/GADD45G/FXYD6/WASF1/ATAD5/YPEL1/CHD7/CLASP2/ARHGEF9/ZNF510/CDC7/EPHB1/CASK/DNM3/CXXC4/CKB/JADE3/CAMSAP2/KDM1A/PAK3/ARHGAP33/ABAT/DBN1/TOP2B/SLC1A1
+
+POLE4/FANCF/CETN2/DDB2/MGMT belong to the WP_DNA_repair_pathways_Full_network
+
+```{r Gene enrichment analysis}
+
+library(dplyr)
+library(msigdbr)
+library(clusterProfiler)
+library(enrichplot)
+library(DT)
+library(ggplot2)
+library(gprofiler2)
+
+if (!file.exists("myGSEA.df")) {
+hs_gsea_c2 <- msigdbr(species = "Homo sapiens", 
+                      category = "C2") %>% 
+  dplyr::select(gs_name, gene_symbol) 
+mydata.df.sub <- dplyr::select(MGMT_markers, gene, avg_log2FC)
+# construct a named vector
+mydata.gsea <- mydata.df.sub$avg_log2FC
+names(mydata.gsea) <- as.character(mydata.df.sub$gene)
+mydata.gsea <- sort(mydata.gsea, decreasing = TRUE)
+myGSEA.res <- GSEA(mydata.gsea, TERM2GENE=hs_gsea_c2, verbose=FALSE) 
+myGSEA.df <- as_tibble(myGSEA.res@result)
+myGSEA.df <- myGSEA.df %>%
+  mutate(phenotype = case_when(
+    NES > 0 ~ "MGMT-",
+    NES < 0 ~ "MGMT+"))
+write.table(myGSEA.df,"myGSEA.df", sep = "\t", col.names= TRUE, row.names = FALSE, quote = FALSE)
+
+} else {
+myGSEA.df <- read.delim("myGSEA.df")  
+ggplot(myGSEA.df[c(1,2,340),], aes(x=phenotype, y=ID)) +
+  geom_point(aes(size=setSize, color = NES)) +
+  scale_color_gradient(low="blue", high="red") +
+  theme_bw()
+}
+
+```
