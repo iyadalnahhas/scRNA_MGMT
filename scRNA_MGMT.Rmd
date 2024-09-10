@@ -190,8 +190,10 @@ CPTAC_seurat$TERTp <- merged$TERT_alter_status
 
 # Create CPTAC_tumor_seurat for tumor cells only
 Idents(CPTAC_seurat) <- CPTAC_seurat$cell_type
+CPTAC_non_tumor_seurat <- subset(CPTAC_seurat, idents = c("TAMs", "Oligodendrocytes", "Neurons", "Pericytes/vSMCs", "T cells", "Monocytes", "Endothelial cells", "Maybe OPC", "B-cells/Plasma"))
 CPTAC_tumor_seurat <- subset(CPTAC_seurat, idents = "Tumor")
 MGMTe <- FetchData(CPTAC_tumor_seurat, vars = "MGMT")
+MGMTe_non_tumor <- FetchData(CPTAC_non_tumor_seurat, vars = "MGMT")
 ## MGMTe ranged from 0-3.14 (median and mean 0)
 CPTAC_tumor_seurat$MGMTe <- ifelse(MGMTe > 0.1, "MGMT+", "MGMT-")  
 saveRDS(CPTAC_tumor_seurat, "CPTAC_tumor_seurat.rds")
@@ -751,7 +753,7 @@ CELF3/PAK5/DCX/DUSP26/MYT1/DLL3/TOX3/ASCL1/TMEM35A/FERMT1/SLCO5A1/NKAIN1/CNTN1/P
 
 POLE4/FANCF/CETN2/DDB2/MGMT belong to the WP_DNA_repair_pathways_Full_network
 
-```{r Gene enrichment analysis}
+```{r Gene enrichment analysis, eval = FALSE}
 
 library(dplyr)
 library(msigdbr)
@@ -780,10 +782,134 @@ write.table(myGSEA.df,"myGSEA.df", sep = "\t", col.names= TRUE, row.names = FALS
 
 } else {
 myGSEA.df <- read.delim("myGSEA.df")  
+
+}
+
+```
+
+```{r Gene enrichment analysis}
+
+library(ggplot2)
+
 ggplot(myGSEA.df[c(1,2,340),], aes(x=phenotype, y=ID)) +
   geom_point(aes(size=setSize, color = NES)) +
   scale_color_gradient(low="blue", high="red") +
   theme_bw()
-}
+
+```
+
+## Visualization of MGMT expression using spatial transcriptomics
+
+```{r Visualization with ST}
+
+library(Seurat)
+library(patchwork)
+library(ggplot2)
+
+# MGMT methylated:
+ZH1019_T1_seurat_obj <- Load10X_Spatial(
+  "Inputs/general/GBM_data/ZH1019T1/outs/",
+  filename = "filtered_feature_bc_matrix.h5",
+  assay = "Spatial",
+  slice = "slice1",
+  filter.matrix = TRUE,
+  to.upper = FALSE,
+  image = NULL,
+)
+
+ZH1019_T1_seurat_obj <- SCTransform(ZH1019_T1_seurat_obj, assay = "Spatial", verbose = FALSE)
+
+# MGMT unmethylated:
+ZH1007_inf_seurat_obj <- Load10X_Spatial(
+  "Inputs/general/GBM_data/ZH1007inf/outs/",
+  filename = "filtered_feature_bc_matrix.h5",
+  assay = "Spatial",
+  slice = "slice1",
+  filter.matrix = TRUE,
+  to.upper = FALSE,
+  image = NULL,
+)
+
+ZH1007_inf_seurat_obj <- SCTransform(ZH1007_inf_seurat_obj, assay = "Spatial", verbose = FALSE)
+
+# Add meta data to ZH1019_T1_seurat_obj
+visium_metadata <- read.csv("Inputs/general/visium_metadata.csv")
+visium_metadata$Tumor <- ifelse(visium_metadata$mp %in% c("AC", "NPC", "Chromatin.Reg", "OPC", "MES", "MES.Hyp", "MES.Ast", "Prolif.Metab"), "tumor", "non-tumor")
+cell_names_ZH1019_T1 <- colnames(ZH1019_T1_seurat_obj)
+visium_metadata_ZH1019_T1 <- visium_metadata[visium_metadata$sample == "ZH1019T1",]
+visium_metadata_ZH1019_T1 <- visium_metadata_ZH1019_T1[visium_metadata_ZH1019_T1$spot_id %in% cell_names_ZH1019_T1,]
+new_rows <- data.frame(
+  spot_id = setdiff(cell_names_ZH1019_T1, visium_metadata_ZH1019_T1$spot_id),
+  Tumor = rep("non-tumor", length(setdiff(cell_names_ZH1019_T1, visium_metadata_ZH1019_T1$spot_id)))
+)
+
+other_columns <- setdiff(names(visium_metadata_ZH1019_T1), names(new_rows))
+new_rows[other_columns] <- NA
+visium_metadata_ZH1019_T1 <- rbind(visium_metadata_ZH1019_T1, new_rows)
+visium_metadata_ZH1019_T1 <- visium_metadata_ZH1019_T1[match(cell_names_ZH1019_T1, visium_metadata_ZH1019_T1$spot_id), ]
+ZH1019_T1_seurat_obj$Tumor <- visium_metadata_ZH1019_T1$Tumor
+rm(new_rows)
+rm(other_columns)
+
+MGMT_ZH1019_T1 <- FetchData(ZH1019_T1_seurat_obj, vars = "MGMT")
+ZH1019_T1_seurat_obj$MGMTe <- ifelse(MGMT_ZH1019_T1 > 0.1, "MGMT+", "MGMT-")
+ZH1019_T1_seurat_obj$tumor_mgmt <- ifelse(
+  ZH1019_T1_seurat_obj$Tumor == "tumor" & ZH1019_T1_seurat_obj$MGMTe == "MGMT+",
+  "tumor_MGMT+",
+  ifelse(
+    ZH1019_T1_seurat_obj$Tumor == "tumor" & ZH1019_T1_seurat_obj$MGMTe == "MGMT-",
+    "tumor_MGMT-",
+    ifelse(
+      ZH1019_T1_seurat_obj$Tumor == "non-tumor",
+      "non_tumor",
+      "other"  # This will handle any other cases not covered by the previous conditions
+    )
+  )
+)
+
+Idents(ZH1019_T1_seurat_obj) <- ZH1019_T1_seurat_obj$tumor_mgmt
+ZH1019_T1_plot <- SpatialDimPlot(ZH1019_T1_seurat_obj, cells.highlight = CellsByIdentities(object = ZH1019_T1_seurat_obj, idents = "tumor_MGMT+"), cols.highlight = c("yellow","blue"))
+
+# Add meta data to ZH1007_inf_seurat_obj
+cell_names_ZH1007_inf <- colnames(ZH1007_inf_seurat_obj)
+visium_metadata_ZH1007_inf <- visium_metadata[visium_metadata$sample == "ZH1007inf",]
+visium_metadata_ZH1007_inf <- visium_metadata_ZH1007_inf[visium_metadata_ZH1007_inf$spot_id %in% cell_names_ZH1007_inf,]
+setdiff(cell_names_ZH1007_inf, visium_metadata_ZH1007_inf$spot_id)
+new_rows <- data.frame(
+  spot_id = setdiff(cell_names_ZH1007_inf, visium_metadata_ZH1007_inf$spot_id),
+  Tumor = rep("non-tumor", length(setdiff(cell_names_ZH1007_inf, visium_metadata_ZH1007_inf$spot_id)))
+)
+other_columns <- setdiff(names(visium_metadata_ZH1007_inf), names(new_rows))
+new_rows[other_columns] <- NA
+visium_metadata_ZH1007_inf <- rbind(visium_metadata_ZH1007_inf, new_rows)
+visium_metadata_ZH1007_inf <- visium_metadata_ZH1007_inf[match(cell_names_ZH1007_inf, visium_metadata_ZH1007_inf$spot_id), ]
+ZH1007_inf_seurat_obj$Tumor <- visium_metadata_ZH1007_inf$Tumor
+rm(new_rows)
+rm(other_columns)
+
+SpatialFeaturePlot(ZH1007_inf_seurat_obj, features = "MGMT")
+MGMT_ZH1007_inf <- FetchData(ZH1007_inf_seurat_obj, vars = "MGMT")
+ZH1007_inf_seurat_obj$MGMTe <- ifelse(MGMT_ZH1007_inf > 0.1, "MGMT+", "MGMT-")
+
+ZH1007_inf_seurat_obj$tumor_mgmt <- ifelse(
+  ZH1007_inf_seurat_obj$Tumor == "tumor" & ZH1007_inf_seurat_obj$MGMTe == "MGMT+",
+  "tumor_MGMT+",
+  ifelse(
+    ZH1007_inf_seurat_obj$Tumor == "tumor" & ZH1007_inf_seurat_obj$MGMTe == "MGMT-",
+    "tumor_MGMT-",
+    ifelse(
+      ZH1007_inf_seurat_obj$Tumor == "non-tumor",
+      "non_tumor",
+      "other"  # This will handle any other cases not covered by the previous conditions
+    )
+  )
+)
+
+Idents(ZH1007_inf_seurat_obj) <- ZH1007_inf_seurat_obj$tumor_mgmt
+ZH1007_inf_plot <- SpatialDimPlot(ZH1007_inf_seurat_obj, cells.highlight = CellsByIdentities(object = ZH1007_inf_seurat_obj, idents = "tumor_MGMT+"), cols.highlight = c("yellow","blue"))
+
+MGMT_plot <- ZH1019_T1_plot + ZH1007_inf_plot + 
+  plot_annotation(tag_levels = 'a') # Labels them as 'a' and 'b'
+ggsave("MGMT_plot.png", plot = MGMT_plot, width = 8, height = 6)
 
 ```
