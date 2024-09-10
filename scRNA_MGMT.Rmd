@@ -252,6 +252,19 @@ generate_table <- function() {
   
   # Combine the methylated and unmethylated data frames
   combined_data <- bind_rows(methylated, unmethylated)
+  
+  # Calculate the median MGMT expression for each group
+  methylated_median <- median(as.numeric(methylated$`MGMT expression %`))
+  unmethylated_median <- median(as.numeric(unmethylated$`MGMT expression %`))
+  
+  # Perform Wilcoxon Rank Sum Test
+  wilcox_test <- wilcox.test(as.numeric(methylated$`MGMT expression %`), 
+                             as.numeric(unmethylated$`MGMT expression %`))
+  
+  # Print the median and Wilcoxon test result
+  print(paste("Median MGMT expression (Methylated):", methylated_median))
+  print(paste("Median MGMT expression (Unmethylated):", unmethylated_median))
+  print(wilcox_test)
 
   datatable(combined_data, 
           extensions = c('KeyTable', "FixedHeader"), 
@@ -411,6 +424,18 @@ generate_table <- function() {
   
   # Combine the methylated and unmethylated data frames
   combined_data <- bind_rows(methylated, unmethylated)
+  
+  methylated_median <- median(as.numeric(methylated$`MGMT expression %`))
+  unmethylated_median <- median(as.numeric(unmethylated$`MGMT expression %`))
+  
+  # Perform Wilcoxon Rank Sum Test
+  wilcox_test <- wilcox.test(as.numeric(methylated$`MGMT expression %`), 
+                             as.numeric(unmethylated$`MGMT expression %`))
+  
+  # Print the median and Wilcoxon test result
+  print(paste("Median MGMT expression (Methylated):", methylated_median))
+  print(paste("Median MGMT expression (Unmethylated):", unmethylated_median))
+  print(wilcox_test)
   
   datatable(combined_data, 
             extensions = c('KeyTable', "FixedHeader"), 
@@ -787,7 +812,7 @@ myGSEA.df <- read.delim("myGSEA.df")
 
 ```
 
-```{r Gene enrichment analysis}
+```{r Gene enrichment analysis, eval=FALSE}
 
 library(ggplot2)
 
