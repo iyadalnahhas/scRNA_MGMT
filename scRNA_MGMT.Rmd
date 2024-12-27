@@ -371,7 +371,7 @@ Neftel_tumor_seurat <- readRDS("Neftel_tumor_seurat.rds")
 ```
 
 ## Neftel: Percentages of MGMT expression per MGMTp status:
-MGMT expression ranged from 0-1.26% in the MGMTp methylated group (median 0.59%), and from 0.3-27.67% in the MGMTp unmethylated group (median 12.44%).
+MGMT expression ranged from 0-1.26% in the MGMTp methylated group (median 0.59%), and from 0.3-29.13% in the MGMTp unmethylated group (median 14.01%).
 
 Three unmethylated samples (out of 16) did not follow the rule of MGMT+ cells >2% (0.3, 0.68, 0.73). Therefore, the <2% cutoff rule has 100% sensitivity and 81.25% specificity to predict unmethylated MGMTp status.
 
