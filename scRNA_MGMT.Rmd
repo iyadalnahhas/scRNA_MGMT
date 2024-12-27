@@ -194,8 +194,10 @@ CPTAC_non_tumor_seurat <- subset(CPTAC_seurat, idents = c("TAMs", "Oligodendrocy
 CPTAC_tumor_seurat <- subset(CPTAC_seurat, idents = "Tumor")
 MGMTe <- FetchData(CPTAC_tumor_seurat, vars = "MGMT")
 MGMTe_non_tumor <- FetchData(CPTAC_non_tumor_seurat, vars = "MGMT")
+## MGMTe <- MGMTe[MGMTe$MGMT>0,]
+## MGMTe <- as.data.frame(MGMTe)
 ## MGMTe ranged from 0-3.14 (median and mean 0)
-CPTAC_tumor_seurat$MGMTe <- ifelse(MGMTe > 0.1, "MGMT+", "MGMT-")  
+CPTAC_tumor_seurat$MGMTe <- ifelse(MGMTe > 0 , "MGMT+", "MGMT-")  
 saveRDS(CPTAC_tumor_seurat, "CPTAC_tumor_seurat.rds")
 
 } else {
@@ -359,7 +361,7 @@ Neftel_seurat$EGFR_status <- merged$EGFR
 Idents(Neftel_seurat) <- Neftel_seurat$malignant
 Neftel_tumor_seurat <- subset(Neftel_seurat, idents = "yes")
 MGMTe <- FetchData(Neftel_tumor_seurat, vars = "MGMT")
-Neftel_tumor_seurat$MGMTe <- ifelse(MGMTe > 0.1, "MGMT+", "MGMT-")  
+Neftel_tumor_seurat$MGMTe <- ifelse(MGMTe > 0 , "MGMT+", "MGMT-")  
 saveRDS(Neftel_tumor_seurat, "Neftel_tumor_seurat.rds")
 
 } else {
@@ -696,7 +698,7 @@ Paired_df <- sample_df %>%
 Paired_df <- Paired_df[!Paired_df$ID %in% c("SF9871", "SF7025", "SF12115", "SF12751", "SF6809", "SF10108"),]
 
 MGMT_Wang <- FetchData(Wang_tumor_seurat, vars = "MGMT")
-Wang_tumor_seurat$MGMTe <- ifelse(MGMT_Wang > 0.1, "MGMT+", "MGMT-")
+Wang_tumor_seurat$MGMTe <- ifelse(MGMT_Wang > 0 , "MGMT+", "MGMT-")
 rm(MGMT_Wang)
 Wang_MGMT_df <- as.data.frame(table(Wang_tumor_seurat$sample, Wang_tumor_seurat$MGMTe))
 colnames(Wang_MGMT_df) <- c("ID", "MGMTe", "Count")
@@ -735,6 +737,22 @@ ggplot(Wang_MGMT_df, aes(x = Stage, y = MGMTpercentage, group = Pair)) +
     color = "Change"
   ) +
   scale_x_discrete(limits = c("Primary", "Recurrent"))
+
+ladder_black_white <- ggplot(Wang_MGMT_df, aes(x = Stage, y = MGMTpercentage, group = Pair)) +
+  geom_point(aes(color = Change), size = 3) +
+  geom_line(aes(color = Change)) +
+  theme_minimal() +
+  labs(
+    title = "Ladder plot of MGMT expression percentage between primary and recurrent samples",
+    x = "",
+    y = "MGMT expression percentage",
+    color = "Change"
+  ) +
+  scale_x_discrete(limits = c("Primary", "Recurrent"))+
+  scale_color_grey(start = 0.2, end = 0.8)
+
+ggsave("ladder_black_white.png", plot = ladder_black_white, width = 8, height = 6)
+
 
 ```
 
@@ -821,6 +839,13 @@ ggplot(myGSEA.df[c(1,2,340),], aes(x=phenotype, y=ID)) +
   scale_color_gradient(low="blue", high="red") +
   theme_bw()
 
+enrichment_figure_black_white <- ggplot(myGSEA.df[c(1, 2, 340),], aes(x = phenotype, y = ID)) +
+  geom_point(aes(size = setSize, color = NES)) +
+  scale_color_gradient(low = "gray20", high = "gray80") +  # Custom gray shades
+  theme_bw()
+
+ggsave("gene_enrichment_black_white.png", plot = enrichment_figure_black_white, width = 8, height = 6)
+
 ```
 
 ## Visualization of MGMT expression using spatial transcriptomics
@@ -877,7 +902,7 @@ rm(new_rows)
 rm(other_columns)
 
 MGMT_ZH1019_T1 <- FetchData(ZH1019_T1_seurat_obj, vars = "MGMT")
-ZH1019_T1_seurat_obj$MGMTe <- ifelse(MGMT_ZH1019_T1 > 0.1, "MGMT+", "MGMT-")
+ZH1019_T1_seurat_obj$MGMTe <- ifelse(MGMT_ZH1019_T1 > 0 , "MGMT+", "MGMT-")
 ZH1019_T1_seurat_obj$tumor_mgmt <- ifelse(
   ZH1019_T1_seurat_obj$Tumor == "tumor" & ZH1019_T1_seurat_obj$MGMTe == "MGMT+",
   "tumor_MGMT+",
@@ -914,7 +939,7 @@ rm(other_columns)
 
 SpatialFeaturePlot(ZH1007_inf_seurat_obj, features = "MGMT")
 MGMT_ZH1007_inf <- FetchData(ZH1007_inf_seurat_obj, vars = "MGMT")
-ZH1007_inf_seurat_obj$MGMTe <- ifelse(MGMT_ZH1007_inf > 0.1, "MGMT+", "MGMT-")
+ZH1007_inf_seurat_obj$MGMTe <- ifelse(MGMT_ZH1007_inf > 0 , "MGMT+", "MGMT-")
 
 ZH1007_inf_seurat_obj$tumor_mgmt <- ifelse(
   ZH1007_inf_seurat_obj$Tumor == "tumor" & ZH1007_inf_seurat_obj$MGMTe == "MGMT+",
